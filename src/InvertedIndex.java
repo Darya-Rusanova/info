@@ -1,14 +1,36 @@
-import java.io.*;
-import java.util.*;
+import org.jsoup.Jsoup;
 
+
+import java.io.*;
+import java.nio.file.Paths;
+import java.util.*;
+import java.nio.file.Files;
+
+import org.tartarus.snowball.ext.englishStemmer;
 public class InvertedIndex implements Serializable {
     private HashMap<String, LinkedList<Integer>> index;
     private ArrayList<String> documents;
+    private HashSet<String> stopWords;
+    private englishStemmer stemmer;
 
     public InvertedIndex(){
         this.index = new HashMap<>();
         this.documents = new ArrayList<>();
+        this.stemmer = new englishStemmer();
+        this.stopWords = new HashSet<>();
     }
+    public InvertedIndex(String stopWordsPath) throws IOException {
+        this();
+        File file = new File(stopWordsPath);
+        if (file.exists()) {
+            Scanner scanner = new Scanner(file);
+            while (scanner.hasNext()) {
+                stopWords.add(scanner.next().toLowerCase().trim());
+            }
+            scanner.close();
+        }
+    }
+
 
     public void setIndex(HashMap<String, LinkedList<Integer>> index) {
         this.index = index;
@@ -18,32 +40,69 @@ public class InvertedIndex implements Serializable {
         this.documents = documents;
     }
 
+    private boolean isStopWord(String word) {
+        return stopWords.contains(word.toLowerCase());
+    }
+
+    private String stemTerm(String term){
+        stemmer.setCurrent(term);
+        stemmer.stem();
+        return stemmer.getCurrent();
+    }
+
+
     public void indexDocument(String path) throws IOException {
-        File file = new File(path);
-        if (!documents.contains(file.getAbsolutePath())) {
-            String content = "";
-            Scanner read = new Scanner(file);
-            while (read.hasNext()) {
-                content += read.next().toLowerCase() + " ";
+        String documentPath;
+        StringBuilder content = new StringBuilder();
+
+        boolean flag = false;
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            flag = true;
+            documentPath = path;
+        } else {
+            File file = new File(path);
+            documentPath = file.getAbsolutePath();
+        }
+
+        if (!documents.contains(documentPath)) {//2
+
+            if (flag) {
+                //content = new StringBuilder(Jsoup.connect(path).proxy("proxy.isu.ru", 3128).get().body().text().toLowerCase());
+                content = new StringBuilder(Jsoup.connect(path).get().body().text().toLowerCase());
+            } else {
+                String mimeType = Files.probeContentType(Paths.get(documentPath));
+                if (mimeType.equals("text/html")){
+                    content = new StringBuilder(Jsoup.parse(new File(documentPath)).body().text().toLowerCase());
+                }
+                else {
+                    Scanner read = new Scanner(new File(documentPath));
+                    while (read.hasNext()) {
+                        content.append(read.next().toLowerCase()).append(" ");//1
+                    }
+                    read.close();
+                }
             }
-            read.close();
-            String[] terms = content.replaceAll("[^a-z0-9]", " ").split(" ");
+
+            String[] terms = content.toString().replaceAll("[^a-z0-9]", " ").split(" ");
 
             int docId = documents.size();
-            documents.add(file.getAbsolutePath());
+            documents.add(documentPath);
             for (int i = 0; i < terms.length; i++) {
                 String term = terms[i].trim();
-                if (!term.isEmpty()) {
-                    if (!index.containsKey(term)) {
-                        index.put(term, new LinkedList<>());
-                        index.get(term).add(docId);
-                    }
-                    else if (!index.get(term).getLast().equals(docId)) {//!!
-                        index.get(term).add(docId);
+                if (!term.isEmpty() && !isStopWord(term)) {
+                    String stemmedTerm = stemTerm(term);
+                    //System.out.println(stemmedTerm);
+                    if (!stemmedTerm.isEmpty()) {
+                        if (!index.containsKey(stemmedTerm)) {
+                            index.put(stemmedTerm, new LinkedList<>());
+                            index.get(stemmedTerm).add(docId);
+                        } else if (!index.get(stemmedTerm).getLast().equals(docId)) {
+                            index.get(stemmedTerm).add(docId);
+                        }
                     }
                 }
             }
-            System.out.printf("| %5d  | %-120s | %8d  |\n", docId, file.getAbsolutePath(), index.size());
+            System.out.printf("| %5d  | %-120s | %8d  |\n", docId, documentPath, index.size());
         }
     }
     public void indexCollection(String folder) throws IOException {
@@ -121,25 +180,37 @@ public class InvertedIndex implements Serializable {
 
         return newList;
     }
+
     public LinkedList<Integer> executeQuery(String query) {
-        LinkedList<Integer> result = new LinkedList<>();
+
         String[] terms = query.toLowerCase().split(" ");
-
-        if (terms.length % 2 == 0) {
-            System.out.println("Ошибка ввода");
-            return result;
+        String firstTerm = null;
+        int firstIndex = 0;
+        for (int i = 0; i < terms.length; i+=2) {
+            if (!isStopWord(terms[i])) {
+                firstTerm = stemTerm(terms[i]);
+                firstIndex = i;
+                break;
+            }
         }
 
-        if (terms.length == 1) {
-            return index.getOrDefault(terms[0], new LinkedList<>());
+        if (firstTerm == null) {
+            return new LinkedList<>();
         }
-        
-        result = index.getOrDefault(terms[0], new LinkedList<>());
 
-        for (int i = 1; i < terms.length; i += 2) {
+        LinkedList<Integer> result = index.getOrDefault(firstTerm, new LinkedList<>());
+
+        for (int i = firstIndex + 1; i < terms.length; i += 2) {
             String operator = terms[i];
             String nextTerm = terms[i + 1];
-            LinkedList<Integer> nextList = index.getOrDefault(nextTerm, new LinkedList<>());
+            LinkedList<Integer> nextList;
+
+            if (isStopWord(nextTerm)){
+                continue;
+            } else {
+                nextTerm = stemTerm(nextTerm);
+                nextList = index.getOrDefault(nextTerm, new LinkedList<>());
+            }
 
             if ("and".equals(operator)) {
                 result = getIntersection(result, nextList);
@@ -150,7 +221,6 @@ public class InvertedIndex implements Serializable {
                 return new LinkedList<>();
             }
         }
-
         return result;
     }
 }
